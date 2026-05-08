@@ -1,0 +1,341 @@
+Metadata-Version: 2.4
+Name: coding-agent
+Version: 0.1.0
+Summary: Windows-first self-hosted coding agent with workspace guard, policy engine, memory, and CLI/API interfaces.
+Author: OpenAI Codex
+License: MIT
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi<1.0.0,>=0.111.0
+Requires-Dist: httpx<1.0.0,>=0.27.0
+Requires-Dist: pydantic<3.0.0,>=2.7.0
+Requires-Dist: pydantic-settings<3.0.0,>=2.2.1
+Requires-Dist: pyyaml<7.0.0,>=6.0.1
+Requires-Dist: typer<1.0.0,>=0.12.3
+Requires-Dist: uvicorn<1.0.0,>=0.30.0
+Provides-Extra: dev
+Requires-Dist: pytest<9.0.0,>=8.2.0; extra == "dev"
+
+# Coding Agent
+
+Локальный Windows-first coding agent для работы с реальными репозиториями. Проект рассчитан на self-hosted запуск, жёсткое ограничение workspace, policy-gates перед опасными действиями, долговременную память в SQLite и локальную работу через Ollama.
+
+## Что это такое
+
+Агент умеет:
+
+- работать только внутри разрешённого workspace
+- читать, искать, создавать, изменять, перемещать и удалять файлы
+- выполнять shell-команды только через единый guarded runner
+- безопасно работать с git
+- хранить память между запусками в SQLite
+- собирать контекст проекта через lexical retrieval
+- общаться с локальной моделью через Ollama
+- запускаться через CLI и базовый FastAPI API
+
+## Что у вас уже произошло
+
+Если `ollama pull deepseek-coder:6.7b` завершился успешно, модель уже загружена.
+
+Если `ollama serve` отвечает:
+
+```text
+Error: listen tcp 127.0.0.1:11434: bind: Only one usage of each socket address...
+```
+
+это почти всегда значит, что Ollama уже запущен в фоне и повторно поднимать сервер не нужно.
+
+Проверить можно так:
+
+```powershell
+ollama list
+```
+
+Если список моделей показывается, сервер уже работает.
+
+## Установка на Windows
+
+1. Установите Python 3.12+.
+2. Установите Git for Windows и убедитесь, что `git` доступен в `PATH`.
+3. Установите Ollama с [https://ollama.com](https://ollama.com).
+4. Перейдите в проект и создайте виртуальное окружение:
+
+```powershell
+cd F:\chrommm\OpenKonst_B
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -e .[dev]
+```
+
+После `pip install -e .[dev]` команда `agent` станет доступна внутри активированного `.venv`.
+
+## Если команда `agent` не найдена
+
+Ошибка:
+
+```text
+agent : Имя "agent" не распознано...
+```
+
+означает, что сейчас выполнено одно из двух:
+
+1. пакет ещё не установлен через `pip install -e .[dev]`
+2. виртуальное окружение `.venv` не активировано
+
+Рабочая последовательность для PowerShell:
+
+```powershell
+cd F:\chrommm\OpenKonst_B
+.\.venv\Scripts\Activate.ps1
+pip install -e .[dev]
+agent inspect --workspace F:\chrommm\OpenKonst_B
+```
+
+Если хотите запустить без активации окружения, можно так:
+
+```powershell
+F:\chrommm\OpenKonst_B\.venv\Scripts\agent.exe inspect --workspace F:\chrommm\OpenKonst_B
+```
+
+или так:
+
+```powershell
+cd F:\chrommm\OpenKonst_B
+py -3.12 -m coding_agent.cli.main inspect --workspace F:\chrommm\OpenKonst_B
+```
+
+## Настройка Ollama
+
+Проект по умолчанию настроен на:
+
+- base URL: `http://127.0.0.1:11434`
+- model: `deepseek-coder:6.7b`
+- retries on transient Ollama startup errors: `6`
+
+Если модель ещё не скачана:
+
+```powershell
+ollama pull deepseek-coder:6.7b
+```
+
+Если Ollama ещё не запущен как сервис или фоновый процесс, запустите:
+
+```powershell
+ollama serve
+```
+
+Если порт уже занят, дополнительный `ollama serve` запускать не нужно.
+
+Если агент получает `503 Service Unavailable`, это часто означает cold start модели или временную перегрузку Ollama. В проекте включён автоматический retry/backoff, и на первом запуске агент может ждать десятки секунд, пока локальная модель прогреется.
+
+## Переменные окружения
+
+Пример лежит в [.env.example](/F:/chrommm/OpenKonst_B/.env.example).
+
+При необходимости:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Основные переменные:
+
+- `CODING_AGENT_CONFIG` - путь к основному YAML-конфигу
+- `CODING_AGENT_POLICY` - путь к policy YAML
+- `CODING_AGENT_MEMORY_DB` - путь к SQLite базе памяти
+- `CODING_AGENT_OLLAMA_BASE_URL` - адрес Ollama
+- `CODING_AGENT_OLLAMA_MODEL` - модель Ollama, по умолчанию `deepseek-coder:6.7b`
+
+## Workspace и безопасность
+
+Все операции идут только через `WorkspaceGuard`.
+
+Он:
+
+- нормализует пути через `pathlib`
+- разрешает только пути внутри workspace
+- блокирует path traversal
+- поддерживает deny/ignore patterns
+- используется всеми file tools и shell runner
+
+## Policy Engine
+
+Policy загружается из [config/policy.yaml](/F:/chrommm/OpenKonst_B/config/policy.yaml).
+
+Поддерживаются режимы:
+
+- `allow`
+- `deny`
+- `require_approval`
+
+Policy применяется к:
+
+- shell-командам
+- file operations
+- git commit/reset/revert
+
+Если операция помечена как `require_approval`, она не будет выполнена без явного `approval=True` на уровне вызова.
+
+## Shell Sandbox
+
+Все shell-команды проходят только через `ShellRunner`.
+
+Что он делает:
+
+- проверяет command policy до выполнения
+- ограничивает `cwd` workspace-ом
+- поддерживает timeout
+- захватывает `stdout/stderr`
+- редактирует секреты из env overrides
+- поддерживает dry-run
+- использует PowerShell как основной backend на Windows
+
+## Работа с git
+
+Git manager умеет:
+
+- определять, является ли workspace git-репозиторием
+- показывать `status`
+- показывать `diff`
+- узнавать текущую ветку
+- создавать ветку
+- делать `add`
+- делать `commit` с policy gate
+- выполнять `reset` и `revert` только через approval-gated путь
+- показывать краткий лог
+
+Автоматический `git push` не выполняется никогда.
+
+## Память
+
+Память хранится в SQLite и переживает перезапуски.
+
+Таблицы:
+
+- `memories`
+- `runs`
+- `tool_calls`
+- `commits`
+
+Поддерживаемые типы памяти:
+
+- `episodic`
+- `semantic`
+- `procedural`
+- `working`
+
+## Retrieval
+
+Retrieval слой сейчас pragmatic и лёгкий:
+
+- lexical file search
+- content search
+- file chunking
+- context packing
+
+Архитектура подготовлена к будущему расширению под vector retrieval, но тяжёлые зависимости пока не требуются.
+
+## CLI команды
+
+Проверить workspace:
+
+```powershell
+agent inspect --workspace F:\chrommm\OpenKonst_B
+```
+
+Запустить оркестратор:
+
+```powershell
+agent run --workspace F:\chrommm\OpenKonst_B --goal "Inspect the repository and summarize the architecture"
+```
+
+Запустить verify pipeline:
+
+```powershell
+agent verify --workspace F:\chrommm\OpenKonst_B --profile python
+```
+
+Поиск по памяти:
+
+```powershell
+agent memory search --workspace F:\chrommm\OpenKonst_B --query "архитектура"
+```
+
+Git status:
+
+```powershell
+agent git status --workspace F:\chrommm\OpenKonst_B
+```
+
+Проверка конфигурации:
+
+```powershell
+agent config validate
+```
+
+Прогон тестов на Windows:
+
+```powershell
+.venv\Scripts\python.exe -m pytest --basetemp .pytest-tmp
+```
+
+## FastAPI API
+
+Запуск:
+
+```powershell
+uvicorn coding_agent.api.app:app --reload
+```
+
+Доступные endpoints:
+
+- `GET /health`
+- `GET /runs`
+- `POST /memory/search`
+
+## Как устроен запуск агента
+
+Bounded orchestration loop делает следующее:
+
+1. принимает goal
+2. достаёт память и релевантный кодовый контекст
+3. вызывает модель в structured JSON режиме
+4. исполняет tool actions
+5. при необходимости запускает verifier
+6. останавливается по final report или по лимитам шагов
+
+## Известные ограничения
+
+- пока нет контейнерного sandbox backend
+- retrieval пока lexical, без vector embeddings
+- качество structured JSON зависит от дисциплины модели
+- approval UX пока программный, а не интерактивный UI
+
+## Roadmap
+
+- vector retrieval
+- tree-sitter / symbol indexing
+- IDE integration
+- web UI
+- container sandbox backend
+
+## Быстрый старт именно для вашей машины
+
+Судя по вашему выводу, следующий практический порядок такой:
+
+```powershell
+cd F:\chrommm\OpenKonst_B
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e .[dev]
+ollama list
+agent inspect --workspace F:\chrommm\OpenKonst_B
+agent run --workspace F:\chrommm\OpenKonst_B --goal "Inspect the repository and summarize the architecture"
+```
+
+Если `agent` всё ещё не находится, используйте прямой путь:
+
+```powershell
+F:\chrommm\OpenKonst_B\.venv\Scripts\agent.exe run --workspace F:\chrommm\OpenKonst_B --goal "Inspect the repository and summarize the architecture"
+```

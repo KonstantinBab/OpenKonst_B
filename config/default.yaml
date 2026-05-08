@@ -1,0 +1,38 @@
+app_name: coding-agent
+log_level: INFO
+memory_db_path: ./data/agent_memory.db
+llm:
+  provider: ollama
+  model: qwen2.5:14b
+  base_url: http://127.0.0.1:11434
+  timeout_seconds: 120
+  max_retries: 10
+  retry_backoff_seconds: 5.0
+  warmup_timeout_seconds: 120
+orchestrator:
+  max_steps: 16
+  max_tool_calls: 48
+  retrieval_max_chunks: 8
+verifier:
+  default_profile: generic
+  python:
+    tests:
+      - python -m pytest
+    lint:
+      - python -m py_compile src
+    type_check: []
+    build: []
+  node:
+    tests:
+      - npm test
+    lint:
+      - npm run lint
+    type_check:
+      - npm run typecheck
+    build:
+      - npm run build
+  generic:
+    tests: []
+    lint: []
+    type_check: []
+    build: []

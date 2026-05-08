@@ -1,0 +1,52 @@
+shell:
+  allow:
+    - "^git\\s+status(?:\\s.*)?$"
+    - "^git\\s+diff(?:\\s.*)?$"
+    - "^git\\s+branch(?:\\s.*)?$"
+    - "^git\\s+log(?:\\s.*)?$"
+    - "^git\\s+rev-parse(?:\\s.*)?$"
+    - "^git\\s+add(?:\\s.*)?$"
+    - "^git\\s+checkout\\s+-b(?:\\s.*)?$"
+    - "^pytest(?:\\s.*)?$"
+    - "^python\\s+-m\\s+pytest(?:\\s.*)?$"
+    - "^ruff(?:\\s.*)?$"
+    - "^mypy(?:\\s.*)?$"
+    - "^npm\\s+test(?:\\s.*)?$"
+    - "^npm\\s+run\\s+build(?:\\s.*)?$"
+    - "^python\\s+-m\\s+py_compile(?:\\s.*)?$"
+  require_approval:
+    - "^git\\s+commit(?:\\s.*)?$"
+    - "^alembic(?:\\s.*)?$"
+    - "^python\\s+manage.py\\s+migrate(?:\\s.*)?$"
+  deny:
+    - "^git\\s+push(?:\\s.*)?$"
+    - "^shutdown(?:\\s.*)?$"
+    - "^reboot(?:\\s.*)?$"
+    - "^format(?:\\s.*)?$"
+    - "^del\\s+/s(?:\\s.*)?$"
+    - "^Remove-Item\\b.*-Recurse.*$"
+file_ops:
+  allow:
+    - read
+    - list
+    - search
+    - write
+    - mkdir
+    - patch
+  require_approval:
+    - move
+    - delete
+  deny: []
+git:
+  allow:
+    - status
+    - diff
+    - branch
+    - log
+    - add
+  require_approval:
+    - commit
+    - reset
+    - revert
+  deny:
+    - push
