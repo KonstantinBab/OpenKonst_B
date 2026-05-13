@@ -58,6 +58,11 @@ class FileTools:
         target = self.guard.resolve_path(path).resolved
         target.parent.mkdir(parents=True, exist_ok=True)
         old = target.read_text(encoding="utf-8") if target.exists() else ""
+        if self._looks_like_accidental_truncation(target, old, content, approval):
+            raise ToolExecutionError(
+                f"Refusing to overwrite existing source file {path} with much smaller content. "
+                "Use replace_in_file or apply_unified_diff for targeted edits."
+            )
         target.write_text(content, encoding="utf-8")
         preview = self._preview(old, content)
         return self._result("write_file", path, diff_preview=preview)
@@ -132,3 +137,15 @@ class FileTools:
             )
         )
         return diff[:limit]
+
+    @staticmethod
+    def _looks_like_accidental_truncation(target: Path, old: str, new: str, approval: bool) -> bool:
+        if approval or not old:
+            return False
+        if target.suffix.lower() not in {".py", ".js", ".ts", ".tsx", ".jsx", ".yaml", ".yml", ".toml"}:
+            return False
+        old_len = len(old.strip())
+        new_len = len(new.strip())
+        if old_len < 1000:
+            return False
+        return new_len < max(300, old_len // 4)

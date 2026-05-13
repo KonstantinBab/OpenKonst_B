@@ -30,7 +30,6 @@ class OllamaProvider(BaseLLMProvider):
         self.max_retries = max_retries
         self.retry_backoff_seconds = retry_backoff_seconds
         self.warmup_timeout_seconds = warmup_timeout_seconds
-        self.force_cli = False
 
     def chat(self, messages: list[ChatMessage], json_mode: bool = False) -> LLMResponse:
         payload: dict[str, Any] = {
@@ -40,17 +39,18 @@ class OllamaProvider(BaseLLMProvider):
         }
         if json_mode:
             payload["format"] = "json"
-        if self.force_cli:
-            return self._chat_via_cli(messages, json_mode=json_mode)
         try:
             response = self._request_with_retries(payload)
             data = response.json()
             return LLMResponse(content=data["message"]["content"], raw=data)
         except LLMResponseError as exc:
-            if "503" not in str(exc):
+            if not self._should_fallback_to_cli(str(exc)):
                 raise
-            self.force_cli = True
             return self._chat_via_cli(messages, json_mode=json_mode)
+
+    @staticmethod
+    def _should_fallback_to_cli(error_text: str) -> bool:
+        return "503" in error_text or "HTTP 500" in error_text
 
     def _request_with_retries(self, payload: dict[str, Any]) -> httpx.Response:
         last_exc: Exception | None = None
@@ -88,11 +88,13 @@ class OllamaProvider(BaseLLMProvider):
                 + prompt
             )
         try:
+            timeout_seconds = self._cli_timeout_seconds(prompt)
             result = subprocess.run(
-                ["ollama", "run", self.model, prompt],
+                ["ollama", "run", self.model],
                 capture_output=True,
+                input=prompt,
                 text=True,
-                timeout=max(self.timeout_seconds, 1),
+                timeout=timeout_seconds,
                 encoding="utf-8",
                 errors="replace",
             )
@@ -103,6 +105,17 @@ class OllamaProvider(BaseLLMProvider):
             raise LLMResponseError(f"Ollama HTTP returned 503 and CLI fallback exited {result.returncode}: {error}")
         content = self._strip_cli_spinner(result.stdout)
         return LLMResponse(content=content, raw={"provider": "ollama_cli", "stderr": result.stderr})
+
+    def _cli_timeout_seconds(self, prompt: str) -> int:
+        prompt_chars = len(prompt)
+        base_timeout = max(self.timeout_seconds * 3, 300)
+        if prompt_chars > 40_000:
+            return max(base_timeout, 900)
+        if prompt_chars > 20_000:
+            return max(base_timeout, 720)
+        if prompt_chars > 8_000:
+            return max(base_timeout, 480)
+        return base_timeout
 
     @staticmethod
     def _messages_to_prompt(messages: list[ChatMessage]) -> str:
@@ -133,7 +146,6 @@ class OllamaProvider(BaseLLMProvider):
                             f"Run `ollama pull {self.model}` or override the model with `agent run --model ...`."
                         ) from exc
                     if "/api/tags HTTP 503" in tag_probe:
-                        self.force_cli = True
                         self._warmup_via_cli()
                         return
                     last_error = f"/api/chat HTTP 503; {tag_probe}"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -40,6 +41,8 @@ class FinalReport(BaseModel):
     summary: str
     changes: list[str] = Field(default_factory=list)
     verification: list[str] = Field(default_factory=list)
+    findings: list[dict[str, str]] = Field(default_factory=list)
+    next_steps: list[str] = Field(default_factory=list)
 
 
 class AgentTurn(BaseModel):
@@ -77,6 +80,15 @@ class AgentTurn(BaseModel):
         final_report = payload.get("final_report")
         if isinstance(final_report, dict) and final_report.get("status") not in {"completed", "stopped", "failed"}:
             final_report = None
+        if isinstance(final_report, dict):
+            summary = cls._clean_summary(str(final_report.get("summary", "")))
+            final_report["summary"] = summary
+            final_report["changes"] = cls._normalize_string_list(final_report.get("changes", []))
+            final_report["verification"] = cls._normalize_string_list(final_report.get("verification", []))
+            final_report["findings"] = cls._normalize_findings(final_report.get("findings", []))
+            final_report["next_steps"] = cls._normalize_string_list(final_report.get("next_steps", []))
+            if cls._is_placeholder_report(final_report):
+                final_report = None
         if isinstance(final_report, dict) and not str(final_report.get("summary", "")).strip():
             final_report = None
         if isinstance(final_report, dict) and final_report.get("status") == "failed":
@@ -85,6 +97,11 @@ class AgentTurn(BaseModel):
                 final_report = None
             if ".git" in summary or "not a git repository" in summary:
                 final_report = None
+        if isinstance(final_report, dict):
+            summary_lower = str(final_report.get("summary", "")).lower()
+            if "recovered final report from partial model output" in summary_lower:
+                final_report = None
+            final_report = cls._mark_unverified_risks(final_report)
 
         normalized_payload = {
             "plan": normalized_plan,
@@ -92,6 +109,19 @@ class AgentTurn(BaseModel):
             "final_report": final_report,
         }
         return cls.model_validate(normalized_payload)
+
+    @classmethod
+    def _is_placeholder_report(cls, final_report: dict[str, Any]) -> bool:
+        summary = cls._clean_summary(str(final_report.get("summary", ""))).lower()
+        changes = [cls._clean_summary(str(item)).lower() for item in final_report.get("changes", [])]
+        verification = [cls._clean_summary(str(item)).lower() for item in final_report.get("verification", [])]
+        if summary in {"string", "summary", "...", "todo"}:
+            return True
+        if any(item in {"string", "changes", "..."} for item in changes):
+            return True
+        if any(item in {"string", "verification", "..."} for item in verification):
+            return True
+        return False
 
     @staticmethod
     def _normalize_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -102,6 +132,8 @@ class AgentTurn(BaseModel):
             normalized["path"] = normalized.pop("filename")
         if "file_path" in normalized and "path" not in normalized:
             normalized["path"] = normalized.pop("file_path")
+        if "ath" in normalized and "path" not in normalized:
+            normalized["path"] = normalized.pop("ath")
         if "key" in normalized and "query" not in normalized:
             normalized["query"] = normalized.pop("key")
         if "keywords" in normalized and "query" not in normalized:
@@ -138,3 +170,87 @@ class AgentTurn(BaseModel):
             "memory_add": ("kind", "content"),
         }
         return all(arguments.get(key) not in (None, "", []) for key in required.get(action_name, ()))
+
+    @staticmethod
+    def _clean_summary(summary: str) -> str:
+        summary = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", summary)
+        summary = summary.replace("\u001b", "")
+        return summary.strip()
+
+    @classmethod
+    def _mark_unverified_risks(cls, final_report: dict[str, Any]) -> dict[str, Any]:
+        verification = [str(item) for item in final_report.get("verification", [])]
+        verified_text = " ".join(verification).lower()
+        changes = [str(item) for item in final_report.get("changes", [])]
+        normalized_changes: list[str] = []
+        for item in changes:
+            cleaned = cls._clean_summary(item)
+            if ("риск" in cleaned.lower() or "risk" in cleaned.lower()) and "run_command" not in verified_text and "read_file" not in verified_text:
+                normalized_changes.append(f"{cleaned} (гипотеза, требует проверки)")
+            else:
+                normalized_changes.append(cleaned)
+        final_report["changes"] = normalized_changes
+        final_report["verification"] = [cls._clean_summary(item) for item in verification]
+        findings = []
+        for item in final_report.get("findings", []):
+            if not isinstance(item, dict):
+                continue
+            title = cls._clean_summary(str(item.get("title", "")))
+            if not title:
+                continue
+            evidence = cls._clean_summary(str(item.get("evidence", "")))
+            status = cls._clean_summary(str(item.get("status", "hypothesis")))
+            recommendation = cls._clean_summary(str(item.get("recommendation", "")))
+            severity = cls._clean_summary(str(item.get("severity", "medium")))
+            if ("риск" in title.lower() or "risk" in title.lower()) and not evidence:
+                status = "hypothesis"
+            findings.append(
+                {
+                    "title": title,
+                    "severity": severity,
+                    "status": status,
+                    "evidence": evidence,
+                    "recommendation": recommendation,
+                }
+            )
+        final_report["findings"] = findings
+        return final_report
+
+    @classmethod
+    def _normalize_findings(cls, raw_findings: Any) -> list[dict[str, str]]:
+        findings: list[dict[str, str]] = []
+        if not isinstance(raw_findings, list):
+            return findings
+        for item in raw_findings:
+            if not isinstance(item, dict):
+                continue
+            title = cls._clean_summary(str(item.get("title", "")))
+            if not title:
+                continue
+            findings.append(
+                {
+                    "title": title,
+                    "severity": cls._clean_summary(str(item.get("severity", "medium"))),
+                    "status": cls._clean_summary(str(item.get("status", "observed"))),
+                    "evidence": cls._clean_summary(str(item.get("evidence", ""))),
+                    "recommendation": cls._clean_summary(str(item.get("recommendation", ""))),
+                }
+            )
+        return findings[:8]
+
+    @classmethod
+    def _normalize_string_list(cls, raw_value: Any) -> list[str]:
+        if raw_value is None:
+            return []
+        if isinstance(raw_value, str):
+            cleaned = cls._clean_summary(raw_value)
+            return [cleaned] if cleaned else []
+        if not isinstance(raw_value, list):
+            cleaned = cls._clean_summary(str(raw_value))
+            return [cleaned] if cleaned else []
+        normalized: list[str] = []
+        for item in raw_value:
+            cleaned = cls._clean_summary(str(item))
+            if cleaned:
+                normalized.append(cleaned)
+        return normalized

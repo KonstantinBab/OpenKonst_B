@@ -3,15 +3,15 @@ log_level: INFO
 memory_db_path: ./data/agent_memory.db
 llm:
   provider: ollama
-  model: qwen2.5:14b
+  model: qwen3.5:9b
   base_url: http://127.0.0.1:11434
   timeout_seconds: 120
   max_retries: 10
   retry_backoff_seconds: 5.0
   warmup_timeout_seconds: 120
 orchestrator:
-  max_steps: 16
-  max_tool_calls: 48
+  max_steps: 24
+  max_tool_calls: 96
   retrieval_max_chunks: 8
 verifier:
   default_profile: generic

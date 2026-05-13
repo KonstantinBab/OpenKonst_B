@@ -102,6 +102,26 @@ def test_chat_falls_back_to_ollama_cli_after_503(monkeypatch: pytest.MonkeyPatch
     assert response.raw["provider"] == "ollama_cli"
 
 
+def test_chat_falls_back_to_ollama_cli_after_500(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = OllamaProvider("http://127.0.0.1:11434", "deepseek-coder:6.7b", retry_backoff_seconds=0.0, max_retries=1)
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        return _response("POST", url, 500)
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stdout = '{"final_report":{"status":"completed","summary":"ok via cli","changes":[],"verification":[]}}'
+        stderr = ""
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr("coding_agent.llm.ollama_provider.subprocess.run", lambda *args, **kwargs: FakeCompletedProcess())
+
+    response = provider.chat([ChatMessage(role="user", content="hello")], json_mode=True)
+
+    assert '"summary":"ok via cli"' in response.content
+    assert response.raw["provider"] == "ollama_cli"
+
+
 def test_warmup_falls_back_to_ollama_cli_after_503_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = OllamaProvider(
         "http://127.0.0.1:11434",
@@ -151,7 +171,47 @@ def test_warmup_switches_to_cli_immediately_when_tags_also_503(monkeypatch: pyte
     monkeypatch.setattr("coding_agent.llm.ollama_provider.subprocess.run", fake_run)
 
     provider.warmup()
-    provider.chat([ChatMessage(role="user", content="hello")])
+    monkeypatch.setattr(httpx, "get", lambda *args, **kwargs: _response("GET", "http://127.0.0.1:11434/api/tags", 200, {"models": [{"name": "deepseek-coder:6.7b"}]}))
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: _response("POST", "http://127.0.0.1:11434/api/chat", 200, {"message": {"content": "done"}}))
+    response = provider.chat([ChatMessage(role="user", content="hello")])
 
-    assert calls == {"post": 1, "get": 1, "cli": 2}
-    assert provider.force_cli is True
+    assert calls == {"post": 1, "get": 1, "cli": 1}
+    assert response.content == "done"
+
+
+def test_chat_cli_fallback_uses_stdin_and_not_prompt_arg(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = OllamaProvider("http://127.0.0.1:11434", "deepseek-coder:6.7b", retry_backoff_seconds=0.0, max_retries=1)
+    captured: dict[str, object] = {}
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        return _response("POST", url, 503)
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stdout = '{"final_report":{"status":"completed","summary":"ok","changes":[],"verification":[]}}'
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["input"] = kwargs.get("input")
+        captured["timeout"] = kwargs.get("timeout")
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr("coding_agent.llm.ollama_provider.subprocess.run", fake_run)
+
+    provider.chat([ChatMessage(role="user", content="hello")], json_mode=True)
+
+    assert captured["args"] == ["ollama", "run", "deepseek-coder:6.7b"]
+    assert "hello" in str(captured["input"])
+    assert isinstance(captured["timeout"], int)
+
+
+def test_cli_timeout_grows_for_large_prompt() -> None:
+    provider = OllamaProvider("http://127.0.0.1:11434", "deepseek-coder:6.7b", timeout_seconds=120)
+
+    short_timeout = provider._cli_timeout_seconds("x" * 1000)
+    long_timeout = provider._cli_timeout_seconds("x" * 50000)
+
+    assert short_timeout >= 300
+    assert long_timeout > short_timeout
