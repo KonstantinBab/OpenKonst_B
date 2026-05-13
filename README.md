@@ -1,1 +1,217 @@
-# OpenKonst_B
+# Local Coding Agent — автономный аналог GitHub Copilot/Codex
+
+**Локальный AI-агент для разработки, запуска и тестирования кода** с поддержкой Ollama и vLLM.
+
+## Возможности
+
+### 🤖 Полноценная разработка
+- **Анализ проекта** — сканирование структуры, чтение ключевых файлов
+- **Редактирование кода** — создание, изменение, рефакторинг файлов
+- **Git-интеграция** — ветки, коммиты, diff
+- **Поиск по коду** — grep-like поиск в файлах проекта
+
+### 🚀 Запуск и тестирование
+- **Выполнение команд** — запуск скриптов, серверов, сборщиков
+- **Автотесты** — автоматический запуск тестов после изменений
+- **Верификация** — профили для Python, Node.js, generic проектов
+- **Изоляция** — sandbox с политиками безопасности
+
+### 💾 Память и контекст
+- **Векторный поиск** — семантический поиск по истории взаимодействий
+- **Эпизодическая память** — запоминание предыдущих запусков
+- **Рабочая память** — краткосрочный контекст задачи
+
+### 🔌 Поддержка моделей
+- **Ollama** — локальные модели (qwen2.5-coder, deepseek-coder, llama3)
+- **vLLM** — высокопроизводительный inference сервер
+- **OpenAI-compatible** — любые совместимые API (LM Studio, LocalAI)
+
+## Быстрый старт
+
+### 1. Установка зависимостей
+
+```bash
+pip install -e .
+```
+
+### 2. Настройка LLM
+
+#### Вариант A: Ollama (рекомендуется)
+```bash
+# Установите Ollama: https://ollama.ai
+ollama pull qwen2.5-coder:7b
+```
+
+#### Вариант B: vLLM
+```bash
+pip install vllm
+python -m vllm.entrypoints.api_server --model Qwen/Qwen2.5-Coder-7B-Instruct --port 8000
+```
+
+### 3. Запуск агента
+
+#### Интерактивный чат (основной режим)
+```bash
+agent chat --workspace /path/to/project --model qwen2.5-coder:7b
+```
+
+#### Одноразовое выполнение задачи
+```bash
+agent run \
+  --workspace /path/to/project \
+  --goal "Добавить функцию логирования в модуль auth" \
+  --model qwen2.5-coder:7b
+```
+
+#### Веб-интерфейс
+```bash
+agent ui --host 127.0.0.1 --port 8765
+```
+
+## Примеры использования
+
+### Разработка新功能
+```bash
+agent chat --workspace ./my-project
+# В чате:
+# "Создай REST API endpoint для получения списка пользователей"
+# "Напиши unit-тесты для нового endpoint"
+# "Запусти тесты и исправь ошибки"
+```
+
+### Рефакторинг
+```bash
+agent run \
+  --workspace ./legacy-code \
+  --goal "Переписать функции на классы с типизацией"
+```
+
+### Анализ проекта
+```bash
+agent run \
+  --workspace ./unknown-repo \
+  --goal "Изучи архитектуру проекта и опиши основные компоненты"
+```
+
+### Исправление багов
+```bash
+agent chat --workspace ./buggy-app
+# "В логах ошибка KeyError в строке 42, найди и исправь"
+```
+
+### Запуск и деплой
+```bash
+agent chat --workspace ./web-app
+# "Запусти dev-сервер и проверь что все работает"
+# "Собери production билд"
+```
+
+## Конфигурация
+
+### config/default.yaml
+```yaml
+app_name: "coding-agent"
+log_level: "INFO"
+
+llm:
+  provider: "ollama"  # или "openai_compatible" для vLLM
+  model: "qwen2.5-coder:7b"
+  base_url: "http://127.0.0.1:11434"
+  timeout_seconds: 120
+  max_retries: 6
+
+orchestrator:
+  max_steps: 12
+  max_tool_calls: 40
+  retrieval_max_chunks: 12
+
+verifier:
+  default_profile: "generic"
+  python:
+    tests: ["pytest", "python -m pytest"]
+    lint: ["ruff check .", "flake8"]
+    type_check: ["mypy ."]
+  node:
+    tests: ["npm test", "yarn test"]
+    lint: ["eslint .", "npm run lint"]
+```
+
+### config/policy.yaml
+```yaml
+allowed_commands:
+  - "python*"
+  - "npm*"
+  - "yarn*"
+  - "git*"
+  - "pytest*"
+  - "node*"
+  
+blocked_commands:
+  - "rm -rf /"
+  - "sudo*"
+  - "curl*|sh"
+  
+require_approval:
+  - "docker*"
+  - "kubectl*"
+```
+
+## Переменные окружения
+
+```bash
+export CODING_AGENT_OLLAMA_BASE_URL=http://127.0.0.1:11434
+export CODING_AGENT_OLLAMA_MODEL=qwen2.5-coder:14b
+export CODING_AGENT_LOG_LEVEL=DEBUG
+export CODING_AGENT_MEMORY_DB=/path/to/memory.db
+```
+
+## Архитектура
+
+```
+src/coding_agent/
+├── cli/           # CLI интерфейс (Typer)
+├── core/          # Оркестратор, планировщик, сессии
+├── llm/           # Провайдеры LLM (Ollama, vLLM, OpenAI)
+├── tools/         # Инструменты (файлы, git, поиск, память)
+├── sandbox/       # Безопасное выполнение команд
+├── memory/        # Векторная и эпизодическая память
+├── config/        # Загрузчик конфигурации
+└── api/           # FastAPI веб-интерфейс
+```
+
+## Рекомендованные модели
+
+| Модель | Размер | Качество | Скорость | Применение |
+|--------|--------|----------|----------|------------|
+| qwen2.5-coder:7b | 7B | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Базовая разработка |
+| qwen2.5-coder:14b | 14B | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Сложные задачи |
+| deepseek-coder:6.7b | 6.7B | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Быстрые правки |
+| llama3.1:8b | 8B | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Общий код |
+| codellama:13b | 13B | ⭐⭐⭐⭐ | ⭐⭐⭐ | Специализированный |
+
+## Безопасность
+
+- **Workspace Guard** — защита от выхода за пределы проекта
+- **Command Policy** — белые/черные списки команд
+- **Approval Mode** — подтверждение опасных операций
+- **Audit Log** — логирование всех действий
+- **Redaction** — скрытие чувствительных данных
+
+## Ограничения
+
+- Требуется установленная локальная LLM (Ollama/vLLM)
+- Для больших проектов рекомендуется 16+ GB RAM
+- Сложные задачи могут требовать multiple итераций
+- Не заменяет code review человеком
+
+## Лицензия
+
+MIT
+
+## Contributing
+
+Принимаются PR с:
+- Новыми инструментами
+- Улучшением промптов
+- Поддержкой дополнительных LLM
+- Интеграциями (Docker, Kubernetes, CI/CD)
