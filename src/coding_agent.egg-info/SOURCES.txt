@@ -1,3 +1,4 @@
+LICENSE
 README.md
 pyproject.toml
 src/coding_agent/__init__.py
@@ -20,6 +21,7 @@ src/coding_agent/core/bootstrap.py
 src/coding_agent/core/context.py
 src/coding_agent/core/orchestrator.py
 src/coding_agent/core/planner.py
+src/coding_agent/core/repo_scan.py
 src/coding_agent/core/session.py
 src/coding_agent/core/verifier.py
 src/coding_agent/llm/__init__.py
@@ -27,6 +29,7 @@ src/coding_agent/llm/base.py
 src/coding_agent/llm/ollama_provider.py
 src/coding_agent/llm/openai_compatible_provider.py
 src/coding_agent/llm/prompt_builder.py
+src/coding_agent/llm/vllm_provider.py
 src/coding_agent/memory/__init__.py
 src/coding_agent/memory/models.py
 src/coding_agent/memory/retrieval.py
@@ -46,10 +49,13 @@ src/coding_agent/util/__init__.py
 src/coding_agent/util/errors.py
 src/coding_agent/util/json_utils.py
 src/coding_agent/util/logging.py
+tests/test_chat_mode.py
+tests/test_cli_repo_scan.py
 tests/test_file_tools.py
 tests/test_git_tools.py
 tests/test_json_utils.py
 tests/test_memory_store.py
+tests/test_ollama_provider.py
 tests/test_orchestrator_smoke.py
 tests/test_shell_runner.py
 tests/test_workspace_guard.py

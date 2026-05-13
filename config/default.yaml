@@ -3,36 +3,74 @@ log_level: INFO
 memory_db_path: ./data/agent_memory.db
 llm:
   provider: ollama
-  model: qwen3.5:9b
+  model: qwen2.5-coder:7b
   base_url: http://127.0.0.1:11434
-  timeout_seconds: 120
+  timeout_seconds: 180
   max_retries: 10
   retry_backoff_seconds: 5.0
-  warmup_timeout_seconds: 120
+  warmup_timeout_seconds: 180
+  # Модели для разных типов задач
+  simple_model: qwen2.5-coder:7b      # Простые задачи: быстрые правки, вопросы
+  complex_model: qwen3.6:27b          # Сложные задачи: архитектура, рефакторинг, анализ
+  chat_model: qwen3.5:9b              # Чат режим
+  auto_switch_enabled: true           # Автоматическое переключение по сложности
+  complexity_threshold: 500           # Порог сложности (символы)
+  # vLLM конфигурация для продакшн-нагрузки
+  vllm:
+    enabled: false
+    base_url: http://127.0.0.1:8000
+    model: Qwen/Qwen2.5-Coder-32B-Instruct
+    tensor_parallel_size: 2
+    max_model_len: 32768
 orchestrator:
-  max_steps: 24
-  max_tool_calls: 96
-  retrieval_max_chunks: 8
+  max_steps: 48                        # Увеличено для сложных задач
+  max_tool_calls: 192                  # Увеличено для комплексных изменений
+  retrieval_max_chunks: 16             # Больше контекста для анализа
+  auto_test_enabled: true              # Авто-тесты после изменений
+  test_on_command_execution: true      # Тесты после запуска команд
+  smart_context_window: true           # Динамическое управление контекстом
+  max_context_chars: 120000            # Максимум символов в контексте
 verifier:
   default_profile: generic
+  auto_detect_profile: true            # Авто-определение типа проекта
+  fail_fast: false                     # Продолжать даже если тесты упали
   python:
     tests:
-      - python -m pytest
+      - python -m pytest -xvs
+      - python -m pytest --cov=src --cov-report=term-missing
     lint:
       - python -m py_compile src
-    type_check: []
+      - python -m flake8 src --max-line-length=120
+    type_check:
+      - python -m mypy src --ignore-missing-imports
     build: []
   node:
     tests:
       - npm test
+      - npm run test:coverage
     lint:
       - npm run lint
     type_check:
       - npm run typecheck
     build:
       - npm run build
+  ml_project:
+    tests:
+      - python -m pytest tests/ -xvs
+      - python -m src.train --smoke-test
+    lint:
+      - python -m py_compile src
+    type_check: []
+    build: []
   generic:
     tests: []
     lint: []
     type_check: []
     build: []
+advanced:
+  enable_deep_analysis: true           # Глубокий анализ для сложных задач
+  enable_incremental_changes: true     # Постепенные изменения с проверкой
+  enable_self_correction: true         # Авто-исправление ошибок
+  max_retry_on_failure: 3              # Попытки исправления
+  context_awareness: high              # low/medium/high
+  parallel_tool_execution: false       # Экспериментально

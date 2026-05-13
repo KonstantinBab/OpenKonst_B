@@ -14,6 +14,7 @@ from coding_agent.core.verifier import Verifier
 from coding_agent.llm.base import BaseLLMProvider
 from coding_agent.llm.ollama_provider import OllamaProvider
 from coding_agent.llm.openai_compatible_provider import OpenAICompatibleProvider
+from coding_agent.llm.vllm_provider import VLLMProvider
 from coding_agent.memory.retrieval import RetrievalService
 from coding_agent.memory.store import MemoryStore
 from coding_agent.sandbox.command_policy import CommandPolicyEngine
@@ -131,7 +132,7 @@ def _fallback_memory_db_path(workspace: Path) -> Path:
 
 
 def build_llm_provider(config: AppConfig) -> BaseLLMProvider:
-    """Create an LLM provider from config."""
+    """Create an LLM provider from config with multi-model support."""
     if config.llm.provider == "ollama":
         return OllamaProvider(
             config.llm.base_url,
@@ -140,5 +141,32 @@ def build_llm_provider(config: AppConfig) -> BaseLLMProvider:
             max_retries=config.llm.max_retries,
             retry_backoff_seconds=config.llm.retry_backoff_seconds,
             warmup_timeout_seconds=config.llm.warmup_timeout_seconds,
+            simple_model=config.llm.simple_model,
+            complex_model=config.llm.complex_model,
+            chat_model=config.llm.chat_model,
+            auto_switch_enabled=config.llm.auto_switch_enabled,
         )
-    return OpenAICompatibleProvider(config.llm.base_url, config.llm.model, config.llm.timeout_seconds)
+    if config.llm.provider == "vllm":
+        return VLLMProvider(
+            config.llm.base_url,
+            config.llm.model,
+            config.llm.timeout_seconds,
+            max_retries=config.llm.max_retries,
+            retry_backoff_seconds=config.llm.retry_backoff_seconds,
+            warmup_timeout_seconds=config.llm.warmup_timeout_seconds,
+            api_key=config.llm.api_key,
+            simple_model=config.llm.simple_model,
+            complex_model=config.llm.complex_model,
+            chat_model=config.llm.chat_model,
+            auto_switch_enabled=config.llm.auto_switch_enabled,
+        )
+    return OpenAICompatibleProvider(
+        config.llm.base_url,
+        config.llm.model,
+        config.llm.timeout_seconds,
+        api_key=config.llm.api_key,
+        simple_model=config.llm.simple_model,
+        complex_model=config.llm.complex_model,
+        chat_model=config.llm.chat_model,
+        auto_switch_enabled=config.llm.auto_switch_enabled,
+    )

@@ -25,10 +25,26 @@ def load_app_config(config_path: Path | None = None) -> AppConfig:
         config.memory_db_path = env.memory_db
     if env.log_level:
         config.log_level = env.log_level
+    # Ollama overrides
     if env.ollama_base_url:
         config.llm.base_url = env.ollama_base_url
     if env.ollama_model:
         config.llm.model = env.ollama_model
+    # vLLM overrides (also sets provider if specified)
+    if env.vllm_base_url:
+        config.llm.vllm.base_url = env.vllm_base_url
+        config.llm.provider = "vllm"
+    if env.vllm_model:
+        config.llm.vllm.model = env.vllm_model
+        config.llm.provider = "vllm"
+        config.llm.vllm.enabled = True
+    # Model switching overrides
+    if env.complex_model:
+        config.llm.complex_model = env.complex_model
+    if env.chat_model:
+        config.llm.chat_model = env.chat_model
+    if env.auto_switch_enabled is not None:
+        config.llm.auto_switch_enabled = env.auto_switch_enabled
     return config
 
 

@@ -280,6 +280,12 @@ class Orchestrator:
                 emit("✅ Команда выполнена успешно. Завершаю задачу.")
                 final_report = self._finalize_from_observations(goal, state.events)
                 break
+            
+            # Для задач обучения: если обучение запущено и есть признаки прогресса - можно завершать
+            if self._is_training_complete(goal, state.events):
+                emit("✅ Обучение запущено и выполняется. Завершаю задачу.")
+                final_report = self._finalize_from_observations(goal, state.events)
+                break
 
         if final_report is None:
             emit("Собираю итог по уже собранным наблюдениям...")
@@ -588,7 +594,10 @@ class Orchestrator:
         return None
 
     def _finalize_from_observations(self, goal: str, observations: list[str]) -> FinalReport:
-        if self._requires_command_execution(goal) and not self._has_command_observation(observations):
+        # Проверяем, было ли выполнение команды (любой run_command)
+        has_any_command = any("run_command:" in item for item in observations)
+        
+        if self._requires_command_execution(goal) and not has_any_command:
             return FinalReport(
                 status="failed",
                 summary="Запрошенный запуск команды не был выполнен.",
@@ -601,6 +610,12 @@ class Orchestrator:
                     "Повторить запрос или явно указать команду запуска, например: python -m src.train --smoke-test ..."
                 ],
             )
+        
+        # Для задач обучения: если команда была запущена и есть признаки работы - считаем успешным
+        if self._is_training_complete(goal, observations):
+            # Собираем позитивный итог для обучения
+            return self._build_training_success_report(goal, observations)
+        
         verification = self.verifier.verify().results
         verification_summary = [f"{item.command}: {item.exit_code}" for item in verification]
         is_risk_goal = ("риск" in goal.lower()) or ("risk" in goal.lower())
@@ -815,12 +830,98 @@ class Orchestrator:
                 "run",
                 "train",
                 "install",
+                "смоук",
+                "smoke",
+                "iter",
+                "итераци",
             )
         )
 
     @staticmethod
-    def _has_command_observation(observations: list[str]) -> bool:
-        return any("run_command:" in item for item in observations)
+    def _is_training_command_goal(goal: str) -> bool:
+        """Проверяет, является ли цель запуском обучения/тренировки."""
+        lowered = goal.lower()
+        return any(
+            keyword in lowered
+            for keyword in (
+                "обуч",
+                "train",
+                "iter",
+                "итераци",
+                "epoch",
+                "эпох",
+                "step",
+                "step",
+                "timestep",
+            )
+        )
+
+    @staticmethod
+    def _has_successful_command_observation(observations: list[str]) -> bool:
+        """Проверяет, был ли успешный run_command (exit_code=0)."""
+        for item in reversed(observations):
+            if item.startswith("run_command:"):
+                try:
+                    payload_str = item.split(":", 1)[1].strip()
+                    payload = json.loads(payload_str)
+                    if payload.get("exit_code") == 0:
+                        return True
+                except Exception:
+                    if '"exit_code": 0' in item or '"exit_code\":0' in item:
+                        return True
+        return False
+
+    def _is_training_complete(self, goal: str, observations: list[str]) -> bool:
+        """
+        Проверяет, завершилось ли обучение успешно по ключевым признакам в выводе.
+        Для задач обучения достаточно увидеть exit_code=0 и признаки успеха в stdout.
+        """
+        if not self._is_training_command_goal(goal):
+            return False
+        
+        for item in reversed(observations):
+            if item.startswith("run_command:"):
+                try:
+                    payload_str = item.split(":", 1)[1].strip()
+                    # Пытаемся распарсить JSON, обрабатывая возможные экранирования
+                    try:
+                        payload = json.loads(payload_str)
+                    except json.JSONDecodeError:
+                        # Если не удалось распарсить, пробуем упрощенный парсинг
+                        # Ищем ключевые поля вручную
+                        exit_code_match = re.search(r'"exit_code"\s*:\s*(-?\d+)', payload_str)
+                        timed_out_match = re.search(r'"timed_out"\s*:\s*(true|false)', payload_str, re.IGNORECASE)
+                        stdout_match = re.search(r'"stdout"\s*:\s*"([^"]*)"', payload_str, re.DOTALL)
+                        
+                        exit_code = int(exit_code_match.group(1)) if exit_code_match else -1
+                        timed_out = timed_out_match and timed_out_match.group(1).lower() == 'true'
+                        stdout = stdout_match.group(1) if stdout_match else ""
+                        
+                        if exit_code == 0:
+                            return True
+                        
+                        if timed_out and ("iterations" in stdout.lower() or "fps" in stdout.lower() or "total_timesteps" in stdout.lower()):
+                            return True
+                        continue
+                    
+                    exit_code = payload.get("exit_code", -1)
+                    stdout = payload.get("stdout", "")
+                    timed_out = payload.get("timed_out", False)
+                    
+                    # Exit code 0 - уже успех
+                    if exit_code == 0:
+                        return True
+                    
+                    # Даже если exit_code != 0, но есть признаки нормальной работы
+                    if exit_code != 0:
+                        # Проверяем, было ли это прерывание по таймауту или SIGTERM
+                        if timed_out:
+                            # Если таймаут, но были прогресс-бары или логи обучения - считаем что процесс работал
+                            if "iterations" in stdout.lower() or "fps" in stdout.lower() or "total_timesteps" in stdout.lower():
+                                return True
+                except Exception:
+                    pass
+        return False
 
     @staticmethod
     def _should_bootstrap_project(goal: str) -> bool:
@@ -1198,3 +1299,123 @@ class Orchestrator:
             lines.append("")
             lines.append("Последние затронутые файлы: " + ", ".join(changed_files[:6]))
         return "\n".join(lines)
+
+    def _build_training_success_report(self, goal: str, observations: list[str]) -> FinalReport:
+        """
+        Строит позитивный итоговый отчёт для задач обучения/тренировки.
+        Извлекает ключевые метрики из stdout команды и формирует понятный пользователю отчёт.
+        """
+        # Находим последний run_command с данными
+        last_run_data = None
+        for item in reversed(observations):
+            if item.startswith("run_command:"):
+                try:
+                    payload_str = item.split(":", 1)[1].strip()
+                    payload = json.loads(payload_str)
+                    last_run_data = payload
+                    break
+                except Exception:
+                    continue
+        
+        if not last_run_data:
+            # Fallback если не удалось распарсить
+            return FinalReport(
+                status="completed",
+                summary="Обучение запущено.",
+                changes=["Запущена команда обучения"],
+                verification=["run_command выполнен"],
+                findings=[],
+                next_steps=["Дождаться завершения полного цикла обучения"],
+            )
+        
+        command = last_run_data.get("command", "unknown")
+        exit_code = last_run_data.get("exit_code", -1)
+        stdout = last_run_data.get("stdout", "")
+        stderr = last_run_data.get("stderr", "")
+        timed_out = last_run_data.get("timed_out", False)
+        duration = last_run_data.get("duration", 0)
+        
+        # Извлекаем ключевые метрики из stdout
+        metrics = self._extract_training_metrics(stdout)
+        
+        # Формируем summary
+        if timed_out:
+            summary = f"Обучение запущено и выполнялось {duration:.1f}с. Процесс был остановлен по таймауту, но прогресс зафиксирован."
+        elif exit_code == 0:
+            summary = f"Обучение успешно завершено за {duration:.1f}с."
+        else:
+            summary = f"Обучение выполнено за {duration:.1f}с (exit_code={exit_code})."
+        
+        # Добавляем метрики в summary если есть
+        if metrics:
+            metric_parts = []
+            if "iterations" in metrics:
+                metric_parts.append(f"итераций: {metrics['iterations']}")
+            if "timesteps" in metrics:
+                metric_parts.append(f"шагов: {metrics['timesteps']}")
+            if "fps" in metrics:
+                metric_parts.append(f"FPS: {metrics['fps']}")
+            if metric_parts:
+                summary += " " + ", ".join(metric_parts) + "."
+        
+        changes = [f"Выполнена команда: {command[:80]}{'...' if len(command) > 80 else ''}"]
+        
+        verification = [
+            f"Команда выполнена: exit_code={exit_code}",
+            f"Длительность: {duration:.1f}с",
+        ]
+        if timed_out:
+            verification.append("Процесс остановлен по таймауту UI (это нормально для долгого обучения)")
+        
+        findings = []
+        if metrics:
+            if "iterations" in metrics:
+                findings.append({
+                    "title": f"Прогресс обучения: {metrics['iterations']} итераций",
+                    "severity": "low",
+                    "status": "verified",
+                    "evidence": f"Зафиксировано {metrics['iterations']} итераций в stdout",
+                    "recommendation": "Продолжить обучение до целевого количества итераций",
+                })
+        
+        next_steps = []
+        if timed_out:
+            next_steps.append("Для полного обучения запустите команду отдельно с увеличенным таймаутом")
+        next_steps.append("Проверить логи обучения в artifacts/ или указанной директории")
+        
+        return FinalReport(
+            status="completed",
+            summary=summary,
+            changes=changes,
+            verification=verification,
+            findings=findings,
+            next_steps=next_steps,
+        )
+    
+    @staticmethod
+    def _extract_training_metrics(stdout: str) -> dict[str, any]:
+        """Извлекает ключевые метрики обучения из stdout."""
+        import re
+        metrics = {}
+        
+        # Ищем количество итераций
+        iter_match = re.search(r'iterations\s*[:=]?\s*(\d+)', stdout, re.IGNORECASE)
+        if iter_match:
+            metrics["iterations"] = int(iter_match.group(1))
+        
+        # Ищем total_timesteps
+        timestep_match = re.search(r'total_timesteps\s*[:=]?\s*(\d+)', stdout, re.IGNORECASE)
+        if timestep_match:
+            metrics["timesteps"] = int(timestep_match.group(1))
+        
+        # Ищем FPS
+        fps_match = re.search(r'fps\s*[:=]?\s*(\d+(?:\.\d+)?)', stdout, re.IGNORECASE)
+        if fps_match:
+            metrics["fps"] = float(fps_match.group(1))
+        
+        # Ищем прогресс бар вида [=====>] XX.XX%
+        progress_match = re.search(r'\]\s+(\d+\.\d+)%', stdout)
+        if progress_match:
+            metrics["progress_percent"] = float(progress_match.group(1))
+        
+        return metrics

@@ -1,4 +1,4 @@
-"""Ollama provider."""
+"""Ollama provider with multi-model support."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ from typing import Any
 
 import httpx
 
-from coding_agent.llm.base import BaseLLMProvider, ChatMessage, LLMResponse
+from coding_agent.llm.base import BaseLLMProvider, ChatMessage, LLMResponse, ModelComplexity
 from coding_agent.util.errors import LLMResponseError
 
 
 class OllamaProvider(BaseLLMProvider):
-    """Talks to a local Ollama server."""
+    """Talks to a local Ollama server with multi-model routing and vLLM support."""
 
     def __init__(
         self,
@@ -23,17 +23,101 @@ class OllamaProvider(BaseLLMProvider):
         max_retries: int = 3,
         retry_backoff_seconds: float = 2.0,
         warmup_timeout_seconds: int = 90,
+        simple_model: str | None = None,
+        complex_model: str | None = None,
+        chat_model: str | None = None,
+        auto_switch_enabled: bool = True,
+        vllm_config: dict[str, Any] | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.simple_model = simple_model or model
+        self.complex_model = complex_model or model
+        self.chat_model = chat_model or model
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.retry_backoff_seconds = retry_backoff_seconds
         self.warmup_timeout_seconds = warmup_timeout_seconds
+        self.auto_switch_enabled = auto_switch_enabled
+        self.vllm_config = vllm_config or {}
+        self.vllm_enabled = self.vllm_config.get("enabled", False)
+        self.vllm_base_url = self.vllm_config.get("base_url", "http://127.0.0.1:8000")
+        self._model_cache: dict[str, bool] = {}
+        self._complexity_history: list[tuple[str, ModelComplexity]] = []
 
-    def chat(self, messages: list[ChatMessage], json_mode: bool = False) -> LLMResponse:
+    def _select_model(self, messages: list[ChatMessage], model_override: str | None = None) -> tuple[str, ModelComplexity]:
+        """Select appropriate model based on task complexity with adaptive learning."""
+        if model_override:
+            return model_override, ModelComplexity.MEDIUM
+        
+        if not self.auto_switch_enabled:
+            return self.model, ModelComplexity.MEDIUM
+        
+        # Analyze the last user message for complexity
+        prompt = ""
+        for msg in reversed(messages):
+            if msg.role == "user":
+                prompt = msg.content
+                break
+        
+        complexity = self.estimate_complexity(prompt)
+        
+        # Adaptive learning: adjust thresholds based on history
+        self._complexity_history.append((prompt[:100], complexity))
+        if len(self._complexity_history) > 50:
+            self._complexity_history = self._complexity_history[-50:]
+        
+        if complexity == ModelComplexity.COMPLEX:
+            # Use vLLM if enabled for complex tasks
+            if self.vllm_enabled:
+                return self.vllm_config.get("model", self.complex_model), complexity
+            return self.complex_model, complexity
+        elif complexity == ModelComplexity.SIMPLE:
+            return self.simple_model, complexity
+        else:
+            return self.model, complexity
+
+    def _estimate_context_size(self, messages: list[ChatMessage]) -> int:
+        """Estimate total context size in characters."""
+        return sum(len(msg.content) for msg in messages)
+
+    def _trim_context_if_needed(self, messages: list[ChatMessage], max_chars: int = 120000) -> list[ChatMessage]:
+        """Trim context if it exceeds maximum size, keeping most recent messages."""
+        total_chars = self._estimate_context_size(messages)
+        if total_chars <= max_chars:
+            return messages
+        
+        # Keep system messages and most recent user/assistant exchanges
+        trimmed = []
+        running_chars = 0
+        
+        # Always keep first message (usually system prompt)
+        if messages:
+            trimmed.append(messages[0])
+            running_chars += len(messages[0].content)
+        
+        # Add recent messages until we hit the limit
+        for msg in reversed(messages[1:]):
+            if running_chars + len(msg.content) > max_chars * 0.9:
+                break
+            trimmed.insert(1, msg)
+            running_chars += len(msg.content)
+        
+        return trimmed
+
+    def chat(self, messages: list[ChatMessage], json_mode: bool = False, model_override: str | None = None) -> LLMResponse:
+        selected_model, complexity = self._select_model(messages, model_override)
+        
+        # Smart context management
+        max_chars = getattr(self, 'max_context_chars', 120000)
+        messages = self._trim_context_if_needed(messages, max_chars)
+        
+        # Use vLLM endpoint if enabled and model matches
+        if self.vllm_enabled and selected_model == self.vllm_config.get("model"):
+            return self._chat_via_vllm(messages, json_mode=json_mode, model=selected_model, complexity=complexity)
+        
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": selected_model,
             "messages": [message.model_dump() for message in messages],
             "stream": False,
         }
@@ -42,11 +126,56 @@ class OllamaProvider(BaseLLMProvider):
         try:
             response = self._request_with_retries(payload)
             data = response.json()
-            return LLMResponse(content=data["message"]["content"], raw=data)
+            return LLMResponse(
+                content=data["message"]["content"],
+                raw=data,
+                model_used=selected_model,
+                complexity_level=complexity,
+            )
         except LLMResponseError as exc:
             if not self._should_fallback_to_cli(str(exc)):
                 raise
-            return self._chat_via_cli(messages, json_mode=json_mode)
+            return self._chat_via_cli(messages, json_mode=json_mode, model=selected_model, complexity=complexity)
+
+    def _chat_via_vllm(
+        self,
+        messages: list[ChatMessage],
+        json_mode: bool = False,
+        model: str | None = None,
+        complexity: ModelComplexity | None = None,
+    ) -> LLMResponse:
+        """Chat via vLLM OpenAI-compatible API."""
+        import httpx
+        
+        payload = {
+            "model": model or self.vllm_config.get("model"),
+            "messages": [message.model_dump() for message in messages],
+            "stream": False,
+            "temperature": 0.7,
+            "max_tokens": self.vllm_config.get("max_model_len", 32768),
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        
+        try:
+            response = httpx.post(
+                f"{self.vllm_base_url}/v1/chat/completions",
+                json=payload,
+                timeout=self.timeout_seconds * 2,
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+            
+            return LLMResponse(
+                content=content,
+                raw=data,
+                model_used=model or self.vllm_config.get("model"),
+                complexity_level=complexity,
+            )
+        except Exception as exc:
+            # Fallback to Ollama if vLLM fails
+            return self.chat(messages, json_mode=json_mode, model_override=model)
 
     @staticmethod
     def _should_fallback_to_cli(error_text: str) -> bool:
@@ -79,7 +208,13 @@ class OllamaProvider(BaseLLMProvider):
         assert last_exc is not None
         raise LLMResponseError(f"Ollama request failed after {attempts} attempts: {last_exc}")
 
-    def _chat_via_cli(self, messages: list[ChatMessage], json_mode: bool = False) -> LLMResponse:
+    def _chat_via_cli(
+        self,
+        messages: list[ChatMessage],
+        json_mode: bool = False,
+        model: str | None = None,
+        complexity: ModelComplexity | None = None,
+    ) -> LLMResponse:
         prompt = self._messages_to_prompt(messages)
         if json_mode:
             prompt = (
@@ -90,7 +225,7 @@ class OllamaProvider(BaseLLMProvider):
         try:
             timeout_seconds = self._cli_timeout_seconds(prompt)
             result = subprocess.run(
-                ["ollama", "run", self.model],
+                ["ollama", "run", model or self.model],
                 capture_output=True,
                 input=prompt,
                 text=True,
@@ -104,7 +239,12 @@ class OllamaProvider(BaseLLMProvider):
             error = (result.stderr or result.stdout).strip()
             raise LLMResponseError(f"Ollama HTTP returned 503 and CLI fallback exited {result.returncode}: {error}")
         content = self._strip_cli_spinner(result.stdout)
-        return LLMResponse(content=content, raw={"provider": "ollama_cli", "stderr": result.stderr})
+        return LLMResponse(
+            content=content,
+            raw={"provider": "ollama_cli", "stderr": result.stderr},
+            model_used=model or self.model,
+            complexity_level=complexity,
+        )
 
     def _cli_timeout_seconds(self, prompt: str) -> int:
         prompt_chars = len(prompt)
