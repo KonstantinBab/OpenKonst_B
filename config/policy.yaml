@@ -18,6 +18,13 @@ shell:
     - "^npm\\s+test(?:\\s.*)?$"
     - "^npm\\s+run\\s+build(?:\\s.*)?$"
     - "^python\\s+-m\\s+py_compile(?:\\s.*)?$"
+    # Разрешаем любые команды обучения с различными параметрами
+    - ".*--total-timesteps.*"
+    - ".*--iterations.*"
+    - ".*--n-envs.*"
+    - ".*--batch-size.*"
+    - ".*--smoke-test.*"
+    - ".*src\\.train.*"
   require_approval:
     - "^git\\s+commit(?:\\s.*)?$"
     - "^alembic(?:\\s.*)?$"

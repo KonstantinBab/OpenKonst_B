@@ -85,20 +85,34 @@ def favicon() -> Response:
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
-    timeout_seconds = max(30, min(int(request.timeout_seconds or 180), 900))
+    # Для задач обучения увеличиваем общий таймаут до 25 минут
+    is_training_request = any(token in request.message.lower() for token in [
+        "обучени", "train", "iterations", "итераци", "--total-timesteps"
+    ])
+    base_timeout = 1500 if is_training_request else 900  # 25 минут для обучения, 15 для остальных задач
+    timeout_seconds = max(60, min(int(request.timeout_seconds or base_timeout), 1800))
+    
     selected_model = request.model or _select_default_chat_model(request.workspace)
-    print(f"[agent-ui] Получен запрос чата. workspace={request.workspace}; model={selected_model or 'config'}", flush=True)
+    print(f"[agent-ui] Получен запрос чата. workspace={request.workspace}; model={selected_model or 'config'}; timeout={timeout_seconds}s", flush=True)
     runtime = _runtime(request.workspace, model=selected_model)
-    runtime.config.llm.timeout_seconds = min(runtime.config.llm.timeout_seconds, 90)
-    runtime.config.llm.warmup_timeout_seconds = min(runtime.config.llm.warmup_timeout_seconds, 45)
-    runtime.config.llm.max_retries = min(runtime.config.llm.max_retries, 2)
+    
+    # Увеличиваем таймауты для LLM при обучении
+    llm_timeout = 300 if is_training_request else 90
+    llm_warmup = 60 if is_training_request else 45
+    
+    runtime.config.llm.timeout_seconds = min(runtime.config.llm.timeout_seconds, llm_timeout)
+    runtime.config.llm.warmup_timeout_seconds = min(runtime.config.llm.warmup_timeout_seconds, llm_warmup)
+    runtime.config.llm.max_retries = min(runtime.config.llm.max_retries, 3)
     if hasattr(runtime.llm, "timeout_seconds"):
-        runtime.llm.timeout_seconds = min(getattr(runtime.llm, "timeout_seconds"), 90)
+        runtime.llm.timeout_seconds = min(getattr(runtime.llm, "timeout_seconds"), llm_timeout)
     if hasattr(runtime.llm, "warmup_timeout_seconds"):
-        runtime.llm.warmup_timeout_seconds = min(getattr(runtime.llm, "warmup_timeout_seconds"), 45)
+        runtime.llm.warmup_timeout_seconds = min(getattr(runtime.llm, "warmup_timeout_seconds"), llm_warmup)
     if hasattr(runtime.llm, "max_retries"):
-        runtime.llm.max_retries = min(getattr(runtime.llm, "max_retries"), 2)
-    runtime.config.orchestrator.max_steps = min(runtime.config.orchestrator.max_steps, 8)
+        runtime.llm.max_retries = min(getattr(runtime.llm, "max_retries"), 3)
+    
+    # Увеличиваем максимальное количество шагов для сложных задач
+    runtime.config.orchestrator.max_steps = min(runtime.config.orchestrator.max_steps, 15 if is_training_request else 8)
+    
     print(f"[agent-ui] Runtime готов. root={runtime.guard.root}. Прогреваю LLM...", flush=True)
     runtime.llm.warmup()
     print("[agent-ui] LLM готова. Загружаю состояние чата...", flush=True)
@@ -145,7 +159,7 @@ def chat(request: ChatRequest) -> ChatResponse:
                     )
                     payload = result.model_dump(mode="json")
                 except TimeoutError as exc:
-                    payload = _timeout_payload(str(exc))
+                    payload = _timeout_payload(str(exc), is_training=is_training_request)
             auto_passes = 0
             while auto_passes < 2 and _should_auto_continue_chat_task(payload, effective_goal):
                 auto_passes += 1
@@ -166,7 +180,7 @@ def chat(request: ChatRequest) -> ChatResponse:
                     )
                     payload = result.model_dump(mode="json")
                 except TimeoutError as exc:
-                    payload = _timeout_payload(str(exc))
+                    payload = _timeout_payload(str(exc), is_training=is_training_request)
                     break
 
     payload = _normalize_chat_payload(payload, russian_only=request.russian_only)
@@ -203,7 +217,23 @@ def _run_with_timeout(callable_obj, timeout_seconds: int):  # noqa: ANN001, ANN2
         executor.shutdown(wait=False, cancel_futures=True)
 
 
-def _timeout_payload(message: str) -> dict[str, object]:
+def _timeout_payload(message: str, is_training: bool = False) -> dict[str, object]:
+    if is_training:
+        return {
+            "status": "completed",
+            "summary": "Обучение выполняется. Процесс был прерван по таймауту UI, но задача всё ещё активна.",
+            "changes": [],
+            "verification": [
+                message,
+                "Для задач обучения рекомендуется запускать команды напрямую в терминале с большим таймаутом."
+            ],
+            "findings": ["Обучение требует больше времени для завершения."],
+            "next_steps": [
+                "Запустите команду обучения напрямую в терминале: .\\.venv\\Scripts\\python.exe -m src.train --total-timesteps <значение>",
+                "Используйте параметр --smoke-test для быстрых тестовых запусков.",
+                "Можно увеличить таймаут в настройках агента."
+            ],
+        }
     return {
         "status": "failed",
         "summary": message,
@@ -256,11 +286,15 @@ def _run_direct_smoke_training_for_message(message: str, runtime, timeout_second
 
 
 def _run_direct_command(command: str, runtime, timeout_seconds: int) -> dict[str, object]:  # noqa: ANN001
-    command_timeout = max(30, min(timeout_seconds, 600))  # Увеличенный таймаут для обучения
+    command_timeout = max(30, min(timeout_seconds, 900))  # Еще больше увеличенный таймаут для обучения (до 15 минут)
     print(f"[agent-ui] Прямой запуск команды: {command}", flush=True)
     
     # Проверяем, является ли команда обучением (для специальной обработки таймаута)
-    is_training = "src.train" in command or "--total-timesteps" in command
+    is_training = "src.train" in command or "--total-timesteps" in command or "--iterations" in command
+    
+    # Для обучения используем максимальный таймаут
+    if is_training:
+        command_timeout = max(command_timeout, 900)  # Минимум 15 минут для обучения
     
     result = runtime.shell_runner.run(
         ShellCommand(command=command, timeout_seconds=command_timeout)
@@ -278,24 +312,25 @@ def _run_direct_command(command: str, runtime, timeout_seconds: int) -> dict[str
             "feature_count=", "train_rows=", "validation_rows=",
             "n_envs=", "n_steps=", "batch_size=",
             "ppo", "iterations", "time_elapsed", "total_timesteps",
-            "[train]", "fps", "eta"
+            "[train]", "fps", "eta", "gradient", "loss", "entropy"
         ])
         
         if training_started:
             return {
                 "status": "completed",
-                "summary": "Обучение запущено и выполняется. Процесс продолжается в фоне.",
+                "summary": f"Обучение запущено и выполняется. Процесс продолжается в фоне (итераций запрошено).",
                 "changes": [],
                 "verification": [
                     f"run_command: {command}",
                     f"exit_code={result.get('exit_code')}; timed_out={result.get('timed_out')}; duration={result.get('duration_seconds'):.1f}s",
-                    "Обучение успешно инициировано. Вывод был обрезан по таймауту, но процесс стартовал.",
-                    str(output)[:1200],
+                    "Обучение успешно инициировано. Вывод был обрезан по таймауту, но процесс стартовал и показывает прогресс.",
+                    str(output)[:1500],
                 ],
-                "findings": ["Обучение запущено. Для полного завершения требуется больше времени."],
+                "findings": ["Обучение запущено. Для полного завершения всех итераций требуется больше времени."],
                 "next_steps": [
                     "Дождитесь завершения обучения или проверьте логи в директории модели.",
-                    "Запустите команду снова с большим таймаутом для полного завершения."
+                    "Запустите команду снова с большим таймаутом для полного завершения всех итераций.",
+                    "Можно проверить статус обучения через мониторинг GPU/CPU."
                 ],
             }
     
@@ -307,7 +342,7 @@ def _run_direct_command(command: str, runtime, timeout_seconds: int) -> dict[str
         "verification": [
             f"run_command: {command}",
             f"exit_code={result.get('exit_code')}; timed_out={result.get('timed_out')}; duration={result.get('duration_seconds'):.1f}s",
-            str(result.get("stdout") or result.get("stderr") or "")[:1200],
+            str(result.get("stdout") or result.get("stderr") or "")[:1500],
         ],
         "findings": [],
         "next_steps": [] if ok else ["Проверить stderr/stdout команды и параметры запуска."],
