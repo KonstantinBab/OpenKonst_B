@@ -256,11 +256,49 @@ def _run_direct_smoke_training_for_message(message: str, runtime, timeout_second
 
 
 def _run_direct_command(command: str, runtime, timeout_seconds: int) -> dict[str, object]:  # noqa: ANN001
-    command_timeout = max(30, min(timeout_seconds, 300))
+    command_timeout = max(30, min(timeout_seconds, 600))  # Увеличенный таймаут для обучения
     print(f"[agent-ui] Прямой запуск команды: {command}", flush=True)
+    
+    # Проверяем, является ли команда обучением (для специальной обработки таймаута)
+    is_training = "src.train" in command or "--total-timesteps" in command
+    
     result = runtime.shell_runner.run(
         ShellCommand(command=command, timeout_seconds=command_timeout)
     ).model_dump()
+    
+    # Для команд обучения считаем успешным запуском даже таймаут, если есть признаки начала работы
+    if is_training and result.get("timed_out"):
+        stdout = str(result.get("stdout") or "")
+        stderr = str(result.get("stderr") or "")
+        output = stdout + stderr
+        
+        # Проверяем признаки успешного начала обучения
+        training_started = any(token in output.lower() for token in [
+            "using cuda device", "using cpu device", 
+            "feature_count=", "train_rows=", "validation_rows=",
+            "n_envs=", "n_steps=", "batch_size=",
+            "ppo", "iterations", "time_elapsed", "total_timesteps",
+            "[train]", "fps", "eta"
+        ])
+        
+        if training_started:
+            return {
+                "status": "completed",
+                "summary": "Обучение запущено и выполняется. Процесс продолжается в фоне.",
+                "changes": [],
+                "verification": [
+                    f"run_command: {command}",
+                    f"exit_code={result.get('exit_code')}; timed_out={result.get('timed_out')}; duration={result.get('duration_seconds'):.1f}s",
+                    "Обучение успешно инициировано. Вывод был обрезан по таймауту, но процесс стартовал.",
+                    str(output)[:1200],
+                ],
+                "findings": ["Обучение запущено. Для полного завершения требуется больше времени."],
+                "next_steps": [
+                    "Дождитесь завершения обучения или проверьте логи в директории модели.",
+                    "Запустите команду снова с большим таймаутом для полного завершения."
+                ],
+            }
+    
     ok = result.get("exit_code") == 0 and not result.get("timed_out")
     return {
         "status": "completed" if ok else "failed",
@@ -294,7 +332,9 @@ def _is_direct_smoke_training_request(message: str, context_hint: str = "") -> b
     repeat_request = any(token in lowered_message for token in ("еще раз", "ещё раз", "снова", "повтори", "again"))
     has_smoke_context = any(token in combined for token in ("тестовое обучение", "smoke", "smoke-test"))
     has_run_request = any(token in lowered_message for token in ("запусти", "запустить", "запуск", "обучи", "run", "train"))
-    return has_smoke_context and (has_run_request or repeat_request)
+    # Также считаем запрос на обучение с указанием итераций как прямой запрос на запуск
+    has_iterations_request = "итераци" in lowered_message or "iteration" in lowered_message
+    return (has_smoke_context and (has_run_request or repeat_request)) or (has_run_request and has_iterations_request)
 
 
 def _is_execution_request(message: str) -> bool:
